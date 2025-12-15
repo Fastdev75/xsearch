@@ -27,7 +27,7 @@ Modern, ultra-fast web content discovery tool written in Go.
 ### Method 1: Go Install (Recommended)
 
 ```bash
-go install github.com/mcauet/xsearch/cmd/xsearch@latest
+go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest
 ```
 
 ### Method 2: Build from Source
