@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"xsearch/internal/utils"
+	"github.com/Fastdev75/xsearch/internal/utils"
 )
 
 // Default wordlist paths (in order of preference)

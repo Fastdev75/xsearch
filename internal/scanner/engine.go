@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"xsearch/internal/httpclient"
-	"xsearch/internal/output"
-	"xsearch/internal/utils"
+	"github.com/Fastdev75/xsearch/internal/httpclient"
+	"github.com/Fastdev75/xsearch/internal/output"
+	"github.com/Fastdev75/xsearch/internal/utils"
 )
 
 // Config holds scanner configuration

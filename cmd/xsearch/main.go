@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"xsearch/internal/output"
-	"xsearch/internal/scanner"
-	"xsearch/internal/utils"
-	"xsearch/internal/wordlist"
+	"github.com/Fastdev75/xsearch/internal/output"
+	"github.com/Fastdev75/xsearch/internal/scanner"
+	"github.com/Fastdev75/xsearch/internal/utils"
+	"github.com/Fastdev75/xsearch/internal/wordlist"
 )
 
 const version = "2.0.0"

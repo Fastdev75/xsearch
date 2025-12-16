@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"xsearch/internal/utils"
+	"github.com/Fastdev75/xsearch/internal/utils"
 )
 
 // Printer handles real-time terminal output
