@@ -10,163 +10,169 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mcauet/xsearch/internal/output"
-	"github.com/mcauet/xsearch/internal/scanner"
-	"github.com/mcauet/xsearch/internal/utils"
-	"github.com/mcauet/xsearch/internal/wordlist"
+	"xsearch/internal/output"
+	"xsearch/internal/scanner"
+	"xsearch/internal/utils"
+	"xsearch/internal/wordlist"
 )
 
-const version = "1.0.0"
+const version = "2.0.0"
 
 func main() {
-	// Define flags
+	// Essential flags only
 	targetURL := flag.String("u", "", "Target URL (required)")
-	wordlistPath := flag.String("w", "", "Wordlist path (default: SecLists common.txt)")
-	outputFile := flag.String("o", "", "Output file for valid URLs")
-	threads := flag.Int("t", 50, "Number of concurrent threads")
-	timeout := flag.Int("timeout", 10, "HTTP request timeout in seconds")
-	statusCodesStr := flag.String("status", "", "Filter by status codes (comma-separated, e.g., 200,301,403)")
-	extensions := flag.String("x", "", "File extensions to check (comma-separated, e.g., php,html,js)")
-	userAgent := flag.String("ua", "Xsearch/1.0", "Custom User-Agent")
-	silent := flag.Bool("silent", false, "Disable banner")
-	showVersion := flag.Bool("version", false, "Show version")
-	showHelp := flag.Bool("h", false, "Show help")
+	wordlistPath := flag.String("w", "", "Custom wordlist path")
+	outputFile := flag.String("o", "", "Output file")
+	threads := flag.Int("t", 50, "Threads")
+	extensions := flag.String("x", "", "Extensions (e.g., php,html,js)")
+
+	// Simple toggles
+	noRecursive := flag.Bool("nr", false, "Disable recursive mode")
+	depth := flag.Int("d", 3, "Max depth")
+
+	// Filtering (advanced)
+	filterCodes := flag.String("fc", "", "Filter status codes (e.g., 403,500)")
+	filterSize := flag.String("fs", "", "Filter by size")
+
+	// Display options
+	silent := flag.Bool("q", false, "Quiet mode (no banner)")
+	showVersion := flag.Bool("v", false, "Version")
+	showHelp := flag.Bool("h", false, "Help")
 
 	flag.Parse()
 
-	// Show version
 	if *showVersion {
-		fmt.Printf("Xsearch v%s\n", version)
+		fmt.Printf("xsearch v%s\n", version)
 		os.Exit(0)
 	}
 
-	// Show help
-	if *showHelp {
+	if *showHelp || *targetURL == "" {
 		printHelp()
 		os.Exit(0)
 	}
 
-	// Show banner
 	if !*silent {
 		utils.Banner()
-	}
-
-	// Validate required flags
-	if *targetURL == "" {
-		utils.PrintError("Target URL is required. Use -u <url>")
-		fmt.Println()
-		printUsage()
-		os.Exit(1)
-	}
-
-	// Parse status codes
-	var statusCodes []int
-	if *statusCodesStr != "" {
-		for _, code := range strings.Split(*statusCodesStr, ",") {
-			code = strings.TrimSpace(code)
-			if c, err := strconv.Atoi(code); err == nil {
-				statusCodes = append(statusCodes, c)
-			}
-		}
 	}
 
 	// Parse extensions
 	var exts []string
 	if *extensions != "" {
 		for _, ext := range strings.Split(*extensions, ",") {
-			ext = strings.TrimSpace(ext)
+			ext = strings.TrimSpace(strings.TrimPrefix(ext, "."))
 			if ext != "" {
 				exts = append(exts, ext)
 			}
 		}
 	}
 
-	// Initialize wordlist manager
+	// Parse filter codes
+	var filtCodes []int
+	if *filterCodes != "" {
+		for _, c := range strings.Split(*filterCodes, ",") {
+			if code, err := strconv.Atoi(strings.TrimSpace(c)); err == nil {
+				filtCodes = append(filtCodes, code)
+			}
+		}
+	}
+
+	// Parse filter sizes
+	var filtSizes []int64
+	if *filterSize != "" {
+		for _, s := range strings.Split(*filterSize, ",") {
+			if size, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+				filtSizes = append(filtSizes, size)
+			}
+		}
+	}
+
+	// Load wordlist
 	wlManager, err := wordlist.NewManager(*wordlistPath)
 	if err != nil {
 		utils.PrintError("%s", err)
 		os.Exit(1)
 	}
 
-	// Load wordlist
 	words, err := wlManager.Load()
 	if err != nil {
-		utils.PrintError("Failed to load wordlist: %s", err)
+		utils.PrintError("%s", err)
 		os.Exit(1)
 	}
 
-	// Initialize output writer
+	// Output writer
 	writer, err := output.NewWriter(*outputFile)
 	if err != nil {
-		utils.PrintError("Failed to create output file: %s", err)
+		utils.PrintError("%s", err)
 		os.Exit(1)
 	}
 	defer writer.Close()
 
-	// Create scanner config
+	// Config with optimal defaults
 	config := &scanner.Config{
-		TargetURL:   *targetURL,
-		Words:       words,
-		Threads:     *threads,
-		Timeout:     time.Duration(*timeout) * time.Second,
-		UserAgent:   *userAgent,
-		StatusCodes: statusCodes,
-		Extensions:  exts,
+		TargetURL:    *targetURL,
+		Words:        words,
+		Threads:      *threads,
+		Timeout:      10 * time.Second,
+		UserAgent:    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		Extensions:   exts,
+		Recursive:    !*noRecursive, // Recursive ON by default
+		MaxDepth:     *depth,
+		AddSlash:     true, // Add slash ON by default
+		FilterCodes:  filtCodes,
+		ExcludeSizes: filtSizes,
 	}
 
-	// Create and run scanner
 	engine := scanner.NewEngine(config, writer)
 
-	// Setup signal handling for graceful shutdown
+	// Signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
 	go func() {
 		<-sigChan
 		fmt.Println()
-		utils.PrintWarning("Interrupt received, stopping scan...")
+		utils.PrintWarning("Stopping...")
 		engine.Stop()
 	}()
 
-	// Run scan
+	// Run
 	if err := engine.Run(); err != nil {
-		utils.PrintError("Scan failed: %s", err)
+		utils.PrintError("%s", err)
 		os.Exit(1)
 	}
 
-	// Print final statistics
 	engine.PrintStats()
 }
 
 func printHelp() {
 	utils.Banner()
-	fmt.Println("Xsearch - Modern Web Content Discovery Tool")
-	fmt.Println()
-	printUsage()
-	fmt.Println()
-	fmt.Println("Flags:")
-	fmt.Println("  -u string        Target URL (required)")
-	fmt.Println("  -w string        Wordlist path (default: SecLists common.txt)")
-	fmt.Println("  -o string        Output file for valid URLs")
-	fmt.Println("  -t int           Number of concurrent threads (default: 50)")
-	fmt.Println("  -timeout int     HTTP request timeout in seconds (default: 10)")
-	fmt.Println("  -status string   Filter by status codes (comma-separated)")
-	fmt.Println("  -x string        File extensions to check (comma-separated)")
-	fmt.Println("  -ua string       Custom User-Agent (default: Xsearch/1.0)")
-	fmt.Println("  -silent          Disable banner")
-	fmt.Println("  -version         Show version")
-	fmt.Println("  -h               Show this help")
-	fmt.Println()
-	fmt.Println("Examples:")
-	fmt.Println("  xsearch -u https://target.com")
-	fmt.Println("  xsearch -u https://target.com -w wordlist.txt -o results.txt")
-	fmt.Println("  xsearch -u https://target.com -t 100 -x php,html,js")
-	fmt.Println("  xsearch -u https://target.com -status 200,301,403")
-	fmt.Println()
-	fmt.Println("Note: Default wordlist requires SecLists to be installed:")
-	fmt.Println("  sudo apt install seclists")
-}
+	fmt.Println(`USAGE:
+  xsearch -u <url> [options]
 
-func printUsage() {
-	fmt.Println("Usage: xsearch -u <url> [options]")
+EXAMPLES:
+  xsearch -u https://target.com                    # Full recursive scan
+  xsearch -u https://target.com -x php,html        # With extensions
+  xsearch -u https://target.com -o results.txt     # Save results
+  xsearch -u https://target.com -nr                # Single scan (no recursion)
+  xsearch -u https://target.com -fc 403,500        # Filter status codes
+
+OPTIONS:
+  -u <url>       Target URL (required)
+  -w <file>      Custom wordlist
+  -o <file>      Output file
+  -t <n>         Threads (default: 50)
+  -x <ext>       Extensions to test (comma-separated)
+  -d <n>         Max recursion depth (default: 3)
+  -nr            Disable recursive scanning
+  -fc <codes>    Filter/hide status codes
+  -fs <sizes>    Filter/hide by response size
+  -q             Quiet mode
+  -v             Version
+  -h             Help
+
+FEATURES (all enabled by default):
+  • Recursive directory scanning (BFS)
+  • Soft 404 detection (hash-based)
+  • Directory detection with slash appending
+  • URL deduplication
+  • Real-time colored output`)
 }

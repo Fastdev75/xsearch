@@ -1,3 +1,3 @@
-module github.com/mcauet/xsearch
+module xsearch
 
-go 1.24.9
+go 1.21

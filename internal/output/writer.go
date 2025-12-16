@@ -2,6 +2,7 @@ package output
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"sync"
 )
@@ -13,6 +14,7 @@ type Writer struct {
 	writer   *bufio.Writer
 	enabled  bool
 	filePath string
+	format   string // "url", "json", or "full"
 }
 
 // NewWriter creates a new file writer
@@ -20,6 +22,7 @@ func NewWriter(outputPath string) (*Writer, error) {
 	w := &Writer{
 		filePath: outputPath,
 		enabled:  outputPath != "",
+		format:   "full",
 	}
 
 	if !w.enabled {
@@ -47,6 +50,30 @@ func (w *Writer) WriteURL(url string) error {
 	defer w.mu.Unlock()
 
 	_, err := w.writer.WriteString(url + "\n")
+	if err != nil {
+		return err
+	}
+
+	// Flush immediately for real-time output
+	return w.writer.Flush()
+}
+
+// WriteResult writes a full result line to the output file
+func (w *Writer) WriteResult(url string, statusCode int, size int64, isDir bool) error {
+	if !w.enabled {
+		return nil
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	typeStr := "FILE"
+	if isDir {
+		typeStr = "DIR"
+	}
+
+	line := fmt.Sprintf("[%d] [%s] [%d] %s\n", statusCode, typeStr, size, url)
+	_, err := w.writer.WriteString(line)
 	if err != nil {
 		return err
 	}

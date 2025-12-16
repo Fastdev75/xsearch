@@ -6,15 +6,17 @@ import (
 	"os"
 	"strings"
 
-	"github.com/mcauet/xsearch/internal/utils"
+	"xsearch/internal/utils"
 )
 
-const (
-	// DefaultSecListsPath is the default path for SecLists on Kali Linux
-	DefaultSecListsPath = "/usr/share/seclists"
-	// DefaultWordlist is the default wordlist path
-	DefaultWordlist = "/usr/share/seclists/Discovery/Web-Content/common.txt"
-)
+// Default wordlist paths (in order of preference)
+var DefaultWordlists = []string{
+	"/usr/share/seclists/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-medium.txt",
+	"/usr/share/seclists/Discovery/Web-Content/big.txt",
+	"/usr/share/seclists/Discovery/Web-Content/common.txt",
+	"/usr/share/wordlists/dirb/big.txt",
+	"/usr/share/wordlists/dirb/common.txt",
+}
 
 // Manager handles wordlist operations
 type Manager struct {
@@ -29,11 +31,18 @@ func NewManager(customPath string) (*Manager, error) {
 	if customPath != "" {
 		m.path = customPath
 	} else {
-		// Check if SecLists is installed
-		if !m.checkSecLists() {
-			return nil, fmt.Errorf("SecLists not found. Please install it:\n  sudo apt install seclists -y")
+		// Find first available default wordlist
+		found := false
+		for _, wl := range DefaultWordlists {
+			if _, err := os.Stat(wl); err == nil {
+				m.path = wl
+				found = true
+				break
+			}
 		}
-		m.path = DefaultWordlist
+		if !found {
+			return nil, fmt.Errorf("no wordlist found. Install SecLists: sudo apt install seclists")
+		}
 	}
 
 	// Verify wordlist file exists
@@ -42,12 +51,6 @@ func NewManager(customPath string) (*Manager, error) {
 	}
 
 	return m, nil
-}
-
-// checkSecLists checks if SecLists is installed
-func (m *Manager) checkSecLists() bool {
-	_, err := os.Stat(DefaultSecListsPath)
-	return err == nil
 }
 
 // Load reads the wordlist file and returns words
@@ -78,7 +81,7 @@ func (m *Manager) Load() ([]string, error) {
 	}
 
 	m.words = words
-	utils.PrintInfo("Loaded %d words from %s", len(words), m.path)
+	utils.PrintInfo("Wordlist: %s (%d entries)", m.path, len(words))
 
 	return words, nil
 }

@@ -2,9 +2,10 @@ package output
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
-	"github.com/mcauet/xsearch/internal/utils"
+	"xsearch/internal/utils"
 )
 
 // Printer handles real-time terminal output
@@ -33,7 +34,7 @@ func NewPrinter(statusCodes []int) *Printer {
 }
 
 // PrintResult prints a scan result to the terminal with color coding
-func (p *Printer) PrintResult(url string, statusCode int, size int64) bool {
+func (p *Printer) PrintResult(url string, statusCode int, size int64, isDir bool, depth int) bool {
 	// Check if we should display this status code
 	if !p.showAll && !p.statusFilter[statusCode] {
 		return false
@@ -50,8 +51,21 @@ func (p *Printer) PrintResult(url string, statusCode int, size int64) bool {
 	color := p.getStatusColor(statusCode)
 	sizeStr := formatSize(size)
 
-	fmt.Printf("%s[%d]%s %s %s[%s]%s\n",
+	// Create indentation based on depth
+	indent := strings.Repeat("  ", depth)
+
+	// Type indicator
+	typeIcon := "FILE"
+	typeColor := utils.White
+	if isDir {
+		typeIcon = "DIR "
+		typeColor = utils.Cyan
+	}
+
+	fmt.Printf("%s%s[%d]%s %s%s%s %s %s[%s]%s\n",
+		indent,
 		color, statusCode, utils.Reset,
+		typeColor, typeIcon, utils.Reset,
 		url,
 		utils.White, sizeStr, utils.Reset)
 
@@ -78,6 +92,9 @@ func (p *Printer) getStatusColor(statusCode int) string {
 func formatSize(size int64) string {
 	if size < 0 {
 		return "N/A"
+	}
+	if size == 0 {
+		return "0B"
 	}
 	if size < 1024 {
 		return fmt.Sprintf("%dB", size)
@@ -110,6 +127,9 @@ func IsInteresting(statusCode int) bool {
 		403: true,
 		405: true,
 		500: true,
+		501: true,
+		502: true,
+		503: true,
 	}
 	return interesting[statusCode]
 }
