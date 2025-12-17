@@ -44,7 +44,7 @@ type Engine struct {
 	processed uint64
 	found     uint64
 	errors    uint64
-	total     uint64
+	total     uint64 // Total URLs to scan for progress
 
 	// Deduplication
 	visited sync.Map
@@ -58,6 +58,10 @@ type Engine struct {
 
 	// Multiple baseline detection for better soft 404 handling
 	baselines []baseline
+
+	// Soft 404 size tracking - detect when many responses have same size
+	soft404Sizes    map[int64]int
+	soft404SizesMux sync.Mutex
 
 	// Filter maps for O(1) lookup
 	filterCodes map[int]bool
@@ -86,16 +90,17 @@ func NewEngine(cfg *Config, writer *output.Writer) *Engine {
 	}
 
 	return &Engine{
-		config:      cfg,
-		client:      httpclient.NewClient(&httpclient.Config{Timeout: cfg.Timeout, UserAgent: cfg.UserAgent}),
-		printer:     output.NewPrinter(cfg.StatusCodes),
-		writer:      writer,
-		ctx:         ctx,
-		cancel:      cancel,
-		directories: make([]string, 0, 100),
-		baselines:   make([]baseline, 0, 5),
-		filterCodes: filterCodes,
-		filterSizes: filterSizes,
+		config:       cfg,
+		client:       httpclient.NewClient(&httpclient.Config{Timeout: cfg.Timeout, UserAgent: cfg.UserAgent}),
+		printer:      output.NewPrinter(cfg.StatusCodes),
+		writer:       writer,
+		ctx:          ctx,
+		cancel:       cancel,
+		directories:  make([]string, 0, 100),
+		baselines:    make([]baseline, 0, 5),
+		soft404Sizes: make(map[int64]int),
+		filterCodes:  filterCodes,
+		filterSizes:  filterSizes,
 	}
 }
 
@@ -230,6 +235,10 @@ func (e *Engine) scanDirectoriesFast(basePath string, depth int) {
 		return
 	}
 
+	totalURLs := uint64(len(urls))
+	atomic.StoreUint64(&e.total, totalURLs)
+	startProcessed := atomic.LoadUint64(&e.processed)
+
 	jobs := make(chan Job, e.config.Threads*4)
 	results := make(chan Result, e.config.Threads*4)
 
@@ -245,12 +254,36 @@ func (e *Engine) scanDirectoriesFast(basePath string, depth int) {
 	resultWg.Add(1)
 	go e.handleDirectoryResults(results, &resultWg, depth)
 
+	// Progress reporter
+	progressDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-progressDone:
+				// Clear progress line
+				fmt.Printf("\r%s\r", strings.Repeat(" ", 60))
+				return
+			case <-ticker.C:
+				current := atomic.LoadUint64(&e.processed) - startProcessed
+				found := atomic.LoadUint64(&e.found)
+				pct := float64(current) / float64(totalURLs) * 100
+				if pct > 100 {
+					pct = 100
+				}
+				fmt.Printf("\r[%.1f%%] %d/%d requests | Found: %d", pct, current, totalURLs, found)
+			}
+		}
+	}()
+
 	// Send jobs
 	go func() {
+	jobLoop:
 		for _, u := range urls {
 			select {
 			case <-e.ctx.Done():
-				break
+				break jobLoop
 			case jobs <- Job{URL: u, Depth: depth}:
 			}
 		}
@@ -260,6 +293,7 @@ func (e *Engine) scanDirectoriesFast(basePath string, depth int) {
 	wg.Wait()
 	close(results)
 	resultWg.Wait()
+	close(progressDone)
 }
 
 // buildDirectoryURLs generates directory URLs only (no file extensions)
@@ -382,6 +416,11 @@ func (e *Engine) handleDirectoryResults(results <-chan Result, wg *sync.WaitGrou
 			continue
 		}
 
+		// Dynamic soft 404 detection for 403/401 with repetitive sizes
+		if e.trackSoft404Size(r.Size, r.StatusCode) {
+			continue
+		}
+
 		// Determine if it's a directory
 		isDir := e.isDirectory(r.URL, r.StatusCode)
 
@@ -436,6 +475,11 @@ func (e *Engine) scanFiles(basePath string) {
 		return
 	}
 
+	totalURLs := uint64(len(urls))
+	atomic.StoreUint64(&e.total, totalURLs)
+	startProcessed := atomic.LoadUint64(&e.processed)
+	startFound := atomic.LoadUint64(&e.found)
+
 	jobs := make(chan Job, e.config.Threads*4)
 	results := make(chan Result, e.config.Threads*4)
 
@@ -451,12 +495,36 @@ func (e *Engine) scanFiles(basePath string) {
 	resultWg.Add(1)
 	go e.handleFileResults(results, &resultWg)
 
+	// Progress reporter
+	progressDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-progressDone:
+				// Clear progress line
+				fmt.Printf("\r%s\r", strings.Repeat(" ", 60))
+				return
+			case <-ticker.C:
+				current := atomic.LoadUint64(&e.processed) - startProcessed
+				found := atomic.LoadUint64(&e.found) - startFound
+				pct := float64(current) / float64(totalURLs) * 100
+				if pct > 100 {
+					pct = 100
+				}
+				fmt.Printf("\r[%.1f%%] %d/%d requests | Found: %d", pct, current, totalURLs, found)
+			}
+		}
+	}()
+
 	// Send jobs
 	go func() {
+	jobLoop:
 		for _, u := range urls {
 			select {
 			case <-e.ctx.Done():
-				break
+				break jobLoop
 			case jobs <- Job{URL: u, Depth: 0}:
 			}
 		}
@@ -466,6 +534,7 @@ func (e *Engine) scanFiles(basePath string) {
 	wg.Wait()
 	close(results)
 	resultWg.Wait()
+	close(progressDone)
 }
 
 // buildFileURLs generates file URLs with extensions
@@ -567,6 +636,11 @@ func (e *Engine) handleFileResults(results <-chan Result, wg *sync.WaitGroup) {
 			continue
 		}
 
+		// Dynamic soft 404 detection for 403/401 with repetitive sizes
+		if e.trackSoft404Size(r.Size, r.StatusCode) {
+			continue
+		}
+
 		// Files are not directories
 		isDir := false
 
@@ -584,31 +658,43 @@ func (e *Engine) handleFileResults(results <-chan Result, wg *sync.WaitGroup) {
 
 // isSoft404 checks if response matches any baseline (soft 404)
 func (e *Engine) isSoft404(hash string, size int64) bool {
-	if hash == "" {
-		return false
-	}
+	// Check against calibration baselines
 	for _, b := range e.baselines {
-		// Match by hash OR by very similar size (within 5%)
-		if b.hash == hash {
+		// Match by hash
+		if hash != "" && b.hash == hash {
 			return true
 		}
-		if b.size > 0 && size > 0 {
-			diff := float64(abs(b.size-size)) / float64(b.size)
-			if diff < 0.05 && b.hash != "" && hash != "" {
-				// Similar size, could be soft 404 with dynamic content
-				// Be conservative - only filter if hash is also similar
-			}
+		// Match by exact size (common for error pages)
+		if b.size > 0 && size == b.size {
+			return true
 		}
 	}
 	return false
 }
 
-func abs(x int64) int64 {
-	if x < 0 {
-		return -x
+// trackSoft404Size tracks response sizes for dynamic soft 404 detection
+// Returns true if this size has been seen too many times (likely soft 404)
+func (e *Engine) trackSoft404Size(size int64, statusCode int) bool {
+	// Only track 403 and 401 responses - these are often soft 404s
+	if statusCode != 403 && statusCode != 401 {
+		return false
 	}
-	return x
+
+	// Very small responses are often error pages
+	if size < 100 {
+		e.soft404SizesMux.Lock()
+		e.soft404Sizes[size]++
+		count := e.soft404Sizes[size]
+		e.soft404SizesMux.Unlock()
+
+		// If we've seen this exact size more than 10 times, it's likely a soft 404
+		if count > 10 {
+			return true
+		}
+	}
+	return false
 }
+
 
 // getDirectoriesAtDepth returns directories found at a specific depth
 func (e *Engine) getDirectoriesAtDepth(depth int) []string {
