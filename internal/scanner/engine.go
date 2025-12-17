@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,7 +31,7 @@ type Config struct {
 	StatusCodes  []int
 }
 
-// Engine is the main scanning engine
+// Engine is the main scanning engine - optimized for speed and accuracy
 type Engine struct {
 	config  *Config
 	client  *http.Client
@@ -43,25 +44,31 @@ type Engine struct {
 	processed uint64
 	found     uint64
 	errors    uint64
+	total     uint64
 
 	// Deduplication
 	visited sync.Map
 
-	// Recursive queue
-	queue   chan string
-	queueWg sync.WaitGroup
+	// Output deduplication (for file output)
+	outputURLs sync.Map
 
-	// Soft 404 detection
-	baseline struct {
-		hash string
-		size int64
-	}
+	// Discovered directories for recursive scanning
+	directories    []string
+	directoriesMux sync.Mutex
+
+	// Multiple baseline detection for better soft 404 handling
+	baselines []baseline
 
 	// Filter maps for O(1) lookup
 	filterCodes map[int]bool
 	filterSizes map[int64]bool
 
 	startTime time.Time
+}
+
+type baseline struct {
+	hash string
+	size int64
 }
 
 // NewEngine creates a new scanner engine
@@ -85,13 +92,14 @@ func NewEngine(cfg *Config, writer *output.Writer) *Engine {
 		writer:      writer,
 		ctx:         ctx,
 		cancel:      cancel,
-		queue:       make(chan string, 1000),
+		directories: make([]string, 0, 100),
+		baselines:   make([]baseline, 0, 5),
 		filterCodes: filterCodes,
 		filterSizes: filterSizes,
 	}
 }
 
-// Run starts the scanning process
+// Run starts the optimized 3-phase scanning process
 func (e *Engine) Run() error {
 	baseURL := e.normalizeURL(e.config.TargetURL)
 	e.startTime = time.Now()
@@ -103,93 +111,147 @@ func (e *Engine) Run() error {
 		utils.PrintInfo("Extensions: %s", strings.Join(e.config.Extensions, ", "))
 	}
 
-	// Calibrate soft 404
-	e.calibrate(baseURL)
+	// Multi-point calibration for better soft 404 detection
+	e.calibrateMultiple(baseURL)
 
 	fmt.Println(strings.Repeat("─", 70))
 
-	// Start queue processor for recursive scanning
-	if e.config.Recursive {
-		e.queueWg.Add(1)
-		go e.processQueue()
+	// === PHASE 1: Fast directory discovery (HEAD requests) ===
+	utils.PrintInfo("Phase 1: Directory Discovery (fast)")
+	e.scanDirectoriesFast(baseURL, 0)
+
+	// === PHASE 2: Recursive subdirectory discovery ===
+	if e.config.Recursive && len(e.directories) > 0 {
+		for depth := 1; depth <= e.config.MaxDepth; depth++ {
+			select {
+			case <-e.ctx.Done():
+				return nil
+			default:
+			}
+
+			// Get directories discovered at previous depth
+			dirs := e.getDirectoriesAtDepth(depth - 1)
+			if len(dirs) == 0 {
+				break
+			}
+
+			utils.PrintInfo("Phase 2: Scanning %d directories at depth %d", len(dirs), depth)
+			for _, dir := range dirs {
+				select {
+				case <-e.ctx.Done():
+					return nil
+				default:
+				}
+				e.scanDirectoriesFast(dir, depth)
+			}
+		}
 	}
 
-	// Initial scan
-	e.scanPath(baseURL, 0)
+	// === PHASE 3: File discovery in all found directories ===
+	if len(e.config.Extensions) > 0 {
+		utils.PrintInfo("Phase 3: File Discovery (%d extensions)", len(e.config.Extensions))
+		allDirs := e.getAllDirectories()
+		// Add base URL to scan for files
+		allDirs = append([]string{baseURL}, allDirs...)
 
-	// Wait for recursive queue to empty
-	if e.config.Recursive {
-		close(e.queue)
-		e.queueWg.Wait()
+		for _, dir := range allDirs {
+			select {
+			case <-e.ctx.Done():
+				return nil
+			default:
+			}
+			e.scanFiles(dir)
+		}
 	}
 
 	return nil
 }
 
-// calibrate detects soft 404 baseline
-func (e *Engine) calibrate(baseURL string) {
-	randomURL := fmt.Sprintf("%s/xsearch_%d_calibration_test", baseURL, time.Now().UnixNano())
-	result := httpclient.RequestWithBody(e.client, randomURL, e.config.UserAgent)
-	if result.Error == nil {
-		e.baseline.hash = result.BodyHash
-		e.baseline.size = result.Size
-		utils.PrintInfo("Calibration: size=%d hash=%s", e.baseline.size, e.baseline.hash[:8])
+// calibrateMultiple performs multiple calibration requests for better soft 404 detection
+func (e *Engine) calibrateMultiple(baseURL string) {
+	patterns := []string{
+		"xsearch_%d_calibration",
+		"nonexistent_%d_page",
+		"random_%d_test_path",
 	}
-}
 
-// processQueue handles recursive directory scanning
-func (e *Engine) processQueue() {
-	defer e.queueWg.Done()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	hashCounts := make(map[string]int)
+	sizeCounts := make(map[int64]int)
 
-	for {
-		select {
-		case <-e.ctx.Done():
-			return
-		case path, ok := <-e.queue:
-			if !ok {
-				return
+	for _, pattern := range patterns {
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			randomURL := fmt.Sprintf("%s/%s", baseURL, fmt.Sprintf(p, time.Now().UnixNano()))
+			result := httpclient.RequestWithBody(e.client, randomURL, e.config.UserAgent)
+			if result.Error == nil && result.StatusCode != 0 {
+				mu.Lock()
+				hashCounts[result.BodyHash]++
+				sizeCounts[result.Size]++
+				e.baselines = append(e.baselines, baseline{hash: result.BodyHash, size: result.Size})
+				mu.Unlock()
 			}
-			// Extract depth from visited map
-			if v, ok := e.visited.Load(path); ok {
-				if depth, ok := v.(int); ok && depth < e.config.MaxDepth {
-					utils.PrintInfo("Scanning: %s (depth %d)", path, depth+1)
-					e.scanPath(path, depth+1)
-				}
-			}
+		}(pattern)
+	}
+	wg.Wait()
+
+	// Find most common hash and size for reporting
+	var commonHash string
+	var commonSize int64
+	maxCount := 0
+	for h, c := range hashCounts {
+		if c > maxCount {
+			maxCount = c
+			commonHash = h
 		}
 	}
+	maxCount = 0
+	for s, c := range sizeCounts {
+		if c > maxCount {
+			maxCount = c
+			commonSize = s
+		}
+	}
+
+	if len(e.baselines) > 0 && commonHash != "" {
+		utils.PrintInfo("Calibration: size=%d hash=%s (sampled %d)", commonSize, commonHash[:8], len(e.baselines))
+	}
 }
 
-// scanPath scans a single path with all words
-func (e *Engine) scanPath(basePath string, depth int) {
-	urls := e.buildURLs(basePath, depth)
+// scanDirectoriesFast performs fast directory discovery using HEAD requests
+func (e *Engine) scanDirectoriesFast(basePath string, depth int) {
+	basePath = strings.TrimRight(basePath, "/")
+
+	// Build directory URLs only (no extensions)
+	urls := e.buildDirectoryURLs(basePath, depth)
 	if len(urls) == 0 {
 		return
 	}
 
-	jobs := make(chan Job, e.config.Threads*2)
-	results := make(chan Result, e.config.Threads*2)
+	jobs := make(chan Job, e.config.Threads*4)
+	results := make(chan Result, e.config.Threads*4)
 
-	// Start workers
+	// Start workers with HEAD requests for speed
 	var wg sync.WaitGroup
 	for i := 0; i < e.config.Threads; i++ {
 		wg.Add(1)
-		go e.worker(jobs, results, &wg)
+		go e.workerFast(jobs, results, &wg)
 	}
 
 	// Result handler
 	var resultWg sync.WaitGroup
 	resultWg.Add(1)
-	go e.handleResults(results, &resultWg, depth)
+	go e.handleDirectoryResults(results, &resultWg, depth)
 
 	// Send jobs
 	go func() {
-	urlLoop:
 		for _, u := range urls {
 			select {
 			case <-e.ctx.Done():
-				break urlLoop
-			case jobs <- Job{URL: u.url, Depth: depth}:
+				break
+			case jobs <- Job{URL: u, Depth: depth}:
 			}
 		}
 		close(jobs)
@@ -200,15 +262,9 @@ func (e *Engine) scanPath(basePath string, depth int) {
 	resultWg.Wait()
 }
 
-type urlEntry struct {
-	url   string
-	isDir bool
-}
-
-// buildURLs generates URLs to scan
-func (e *Engine) buildURLs(basePath string, depth int) []urlEntry {
-	basePath = strings.TrimRight(basePath, "/")
-	var urls []urlEntry
+// buildDirectoryURLs generates directory URLs only (no file extensions)
+func (e *Engine) buildDirectoryURLs(basePath string, depth int) []string {
+	var urls []string
 
 	for _, word := range e.config.Words {
 		word = strings.TrimSpace(word)
@@ -216,6 +272,11 @@ func (e *Engine) buildURLs(basePath string, depth int) []urlEntry {
 			continue
 		}
 		word = strings.TrimPrefix(word, "/")
+
+		// Skip words that look like files (have extensions)
+		if strings.Contains(word, ".") {
+			continue
+		}
 
 		fullURL := fmt.Sprintf("%s/%s", basePath, word)
 
@@ -225,23 +286,14 @@ func (e *Engine) buildURLs(basePath string, depth int) []urlEntry {
 		}
 		e.visited.Store(fullURL, depth)
 
-		urls = append(urls, urlEntry{url: fullURL, isDir: true})
+		urls = append(urls, fullURL)
 
-		// Add slash version for directory detection
+		// Also test with trailing slash for directory confirmation
 		if e.config.AddSlash {
 			slashURL := fullURL + "/"
 			if _, visited := e.visited.Load(slashURL); !visited {
 				e.visited.Store(slashURL, depth)
-				urls = append(urls, urlEntry{url: slashURL, isDir: true})
-			}
-		}
-
-		// Add extensions
-		for _, ext := range e.config.Extensions {
-			extURL := fmt.Sprintf("%s/%s.%s", basePath, word, ext)
-			if _, visited := e.visited.Load(extURL); !visited {
-				e.visited.Store(extURL, depth)
-				urls = append(urls, urlEntry{url: extURL, isDir: false})
+				urls = append(urls, slashURL)
 			}
 		}
 	}
@@ -249,8 +301,8 @@ func (e *Engine) buildURLs(basePath string, depth int) []urlEntry {
 	return urls
 }
 
-// worker processes HTTP requests
-func (e *Engine) worker(jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup) {
+// workerFast uses HEAD requests for faster directory discovery
+func (e *Engine) workerFast(jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for {
@@ -261,15 +313,35 @@ func (e *Engine) worker(jobs <-chan Job, results chan<- Result, wg *sync.WaitGro
 			if !ok {
 				return
 			}
-			r := httpclient.RequestWithBody(e.client, job.URL, e.config.UserAgent)
+			// Use HEAD request first (faster)
+			r := httpclient.HeadRequest(e.client, job.URL, e.config.UserAgent)
+
+			// For successful responses, verify with GET to check soft 404
+			needsVerification := r.Error == nil &&
+				r.StatusCode != 404 &&
+				!e.filterCodes[r.StatusCode] &&
+				(r.StatusCode == 200 || r.StatusCode == 301 || r.StatusCode == 302 || r.StatusCode == 403)
+
+			var bodyHash string
+			var size int64 = r.Size
+
+			if needsVerification {
+				// Verify with GET request to check body hash
+				fullResult := httpclient.RequestWithBody(e.client, job.URL, e.config.UserAgent)
+				if fullResult.Error == nil {
+					bodyHash = fullResult.BodyHash
+					size = fullResult.Size
+				}
+			}
+
 			select {
 			case <-e.ctx.Done():
 				return
 			case results <- Result{
 				URL:        r.URL,
 				StatusCode: r.StatusCode,
-				Size:       r.Size,
-				BodyHash:   r.BodyHash,
+				Size:       size,
+				BodyHash:   bodyHash,
 				Depth:      job.Depth,
 				Error:      r.Error,
 			}:
@@ -278,8 +350,8 @@ func (e *Engine) worker(jobs <-chan Job, results chan<- Result, wg *sync.WaitGro
 	}
 }
 
-// handleResults processes scan results
-func (e *Engine) handleResults(results <-chan Result, wg *sync.WaitGroup, depth int) {
+// handleDirectoryResults processes directory scan results
+func (e *Engine) handleDirectoryResults(results <-chan Result, wg *sync.WaitGroup, depth int) {
 	defer wg.Done()
 
 	for r := range results {
@@ -295,48 +367,287 @@ func (e *Engine) handleResults(results <-chan Result, wg *sync.WaitGroup, depth 
 			continue
 		}
 
+		// Skip server errors for recursive scanning (often false positives)
+		if r.StatusCode >= 500 {
+			continue
+		}
+
 		// Skip filtered sizes
 		if e.filterSizes[r.Size] {
 			continue
 		}
 
-		// Skip soft 404 (same hash as baseline - works for any status code)
-		if e.baseline.hash != "" && r.BodyHash == e.baseline.hash {
+		// Skip soft 404 (check against all baselines)
+		if e.isSoft404(r.BodyHash, r.Size) {
 			continue
 		}
 
-		// Determine if directory
+		// Determine if it's a directory
 		isDir := e.isDirectory(r.URL, r.StatusCode)
 
 		// Print result
 		if e.printer.PrintResult(r.URL, r.StatusCode, r.Size, isDir, depth) {
 			atomic.AddUint64(&e.found, 1)
 
-			// Write to file
-			if output.IsInteresting(r.StatusCode) && e.writer.IsEnabled() {
-				e.writer.WriteResult(r.URL, r.StatusCode, r.Size, isDir)
+			// Write to file - only reliable results, deduplicated
+			if e.isReliableResult(r.StatusCode) && e.writer.IsEnabled() {
+				e.writeUniqueURL(r.URL)
 			}
 
-			// Queue for recursive scanning
-			if e.config.Recursive && isDir && depth < e.config.MaxDepth {
-				if r.StatusCode == 200 || r.StatusCode == 301 || r.StatusCode == 302 || r.StatusCode == 403 {
-					// Store depth for later use
-					url := strings.TrimRight(r.URL, "/")
-					e.visited.Store(url, depth)
-					select {
-					case e.queue <- url:
-					default:
-						// Queue full, skip
-					}
-				}
+			// Store directory for recursive scanning - only for successful responses
+			// Don't recurse into 4xx errors as they're usually not real directories
+			if isDir && (r.StatusCode == 200 || r.StatusCode == 301 || r.StatusCode == 302 || r.StatusCode == 307 || r.StatusCode == 308) {
+				url := strings.TrimRight(r.URL, "/")
+				e.directoriesMux.Lock()
+				e.directories = append(e.directories, fmt.Sprintf("%d:%s", depth, url))
+				e.directoriesMux.Unlock()
 			}
 		}
 	}
 }
 
+// isReliableResult returns true if the status code indicates a reliable finding
+func (e *Engine) isReliableResult(statusCode int) bool {
+	// Only write truly valid results to output file
+	return statusCode == 200 || statusCode == 301 || statusCode == 302 ||
+		statusCode == 307 || statusCode == 308 || statusCode == 403 || statusCode == 401
+}
+
+// writeUniqueURL writes URL to output file, avoiding duplicates (normalizes trailing slash)
+func (e *Engine) writeUniqueURL(url string) {
+	// Normalize URL (remove trailing slash for deduplication)
+	normalizedURL := strings.TrimRight(url, "/")
+
+	// Check if already written
+	if _, exists := e.outputURLs.LoadOrStore(normalizedURL, true); exists {
+		return
+	}
+
+	// Write the original URL
+	e.writer.WriteURL(url)
+}
+
+// scanFiles scans for files with extensions in a directory
+func (e *Engine) scanFiles(basePath string) {
+	basePath = strings.TrimRight(basePath, "/")
+
+	urls := e.buildFileURLs(basePath)
+	if len(urls) == 0 {
+		return
+	}
+
+	jobs := make(chan Job, e.config.Threads*4)
+	results := make(chan Result, e.config.Threads*4)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < e.config.Threads; i++ {
+		wg.Add(1)
+		go e.workerFiles(jobs, results, &wg)
+	}
+
+	// Result handler
+	var resultWg sync.WaitGroup
+	resultWg.Add(1)
+	go e.handleFileResults(results, &resultWg)
+
+	// Send jobs
+	go func() {
+		for _, u := range urls {
+			select {
+			case <-e.ctx.Done():
+				break
+			case jobs <- Job{URL: u, Depth: 0}:
+			}
+		}
+		close(jobs)
+	}()
+
+	wg.Wait()
+	close(results)
+	resultWg.Wait()
+}
+
+// buildFileURLs generates file URLs with extensions
+func (e *Engine) buildFileURLs(basePath string) []string {
+	var urls []string
+
+	for _, word := range e.config.Words {
+		word = strings.TrimSpace(word)
+		if word == "" || strings.HasPrefix(word, "#") {
+			continue
+		}
+		word = strings.TrimPrefix(word, "/")
+
+		// Add each extension
+		for _, ext := range e.config.Extensions {
+			extURL := fmt.Sprintf("%s/%s.%s", basePath, word, ext)
+			if _, visited := e.visited.Load(extURL); !visited {
+				e.visited.Store(extURL, 0)
+				urls = append(urls, extURL)
+			}
+		}
+	}
+
+	return urls
+}
+
+// workerFiles handles file discovery with GET requests
+func (e *Engine) workerFiles(jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case job, ok := <-jobs:
+			if !ok {
+				return
+			}
+			// Use HEAD for speed, only GET if potentially interesting
+			r := httpclient.HeadRequest(e.client, job.URL, e.config.UserAgent)
+
+			var bodyHash string
+			var size int64 = r.Size
+
+			// Verify interesting results
+			if r.Error == nil && r.StatusCode != 404 && !e.filterCodes[r.StatusCode] {
+				fullResult := httpclient.RequestWithBody(e.client, job.URL, e.config.UserAgent)
+				if fullResult.Error == nil {
+					bodyHash = fullResult.BodyHash
+					size = fullResult.Size
+				}
+			}
+
+			select {
+			case <-e.ctx.Done():
+				return
+			case results <- Result{
+				URL:        r.URL,
+				StatusCode: r.StatusCode,
+				Size:       size,
+				BodyHash:   bodyHash,
+				Depth:      job.Depth,
+				Error:      r.Error,
+			}:
+			}
+		}
+	}
+}
+
+// handleFileResults processes file scan results
+func (e *Engine) handleFileResults(results <-chan Result, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for r := range results {
+		atomic.AddUint64(&e.processed, 1)
+
+		if r.Error != nil {
+			atomic.AddUint64(&e.errors, 1)
+			continue
+		}
+
+		// Skip 404 and filtered codes
+		if r.StatusCode == 404 || e.filterCodes[r.StatusCode] {
+			continue
+		}
+
+		// Skip server errors (usually false positives)
+		if r.StatusCode >= 500 {
+			continue
+		}
+
+		// Skip filtered sizes
+		if e.filterSizes[r.Size] {
+			continue
+		}
+
+		// Skip soft 404
+		if e.isSoft404(r.BodyHash, r.Size) {
+			continue
+		}
+
+		// Files are not directories
+		isDir := false
+
+		// Print result
+		if e.printer.PrintResult(r.URL, r.StatusCode, r.Size, isDir, 0) {
+			atomic.AddUint64(&e.found, 1)
+
+			// Write to file - only reliable results, deduplicated
+			if e.isReliableResult(r.StatusCode) && e.writer.IsEnabled() {
+				e.writeUniqueURL(r.URL)
+			}
+		}
+	}
+}
+
+// isSoft404 checks if response matches any baseline (soft 404)
+func (e *Engine) isSoft404(hash string, size int64) bool {
+	if hash == "" {
+		return false
+	}
+	for _, b := range e.baselines {
+		// Match by hash OR by very similar size (within 5%)
+		if b.hash == hash {
+			return true
+		}
+		if b.size > 0 && size > 0 {
+			diff := float64(abs(b.size-size)) / float64(b.size)
+			if diff < 0.05 && b.hash != "" && hash != "" {
+				// Similar size, could be soft 404 with dynamic content
+				// Be conservative - only filter if hash is also similar
+			}
+		}
+	}
+	return false
+}
+
+func abs(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// getDirectoriesAtDepth returns directories found at a specific depth
+func (e *Engine) getDirectoriesAtDepth(depth int) []string {
+	e.directoriesMux.Lock()
+	defer e.directoriesMux.Unlock()
+
+	prefix := fmt.Sprintf("%d:", depth)
+	var dirs []string
+	for _, d := range e.directories {
+		if strings.HasPrefix(d, prefix) {
+			dirs = append(dirs, strings.TrimPrefix(d, prefix))
+		}
+	}
+	return dirs
+}
+
+// getAllDirectories returns all discovered directories
+func (e *Engine) getAllDirectories() []string {
+	e.directoriesMux.Lock()
+	defer e.directoriesMux.Unlock()
+
+	var dirs []string
+	seen := make(map[string]bool)
+	for _, d := range e.directories {
+		parts := strings.SplitN(d, ":", 2)
+		if len(parts) == 2 && !seen[parts[1]] {
+			seen[parts[1]] = true
+			dirs = append(dirs, parts[1])
+		}
+	}
+
+	// Sort for consistent output
+	sort.Strings(dirs)
+	return dirs
+}
+
 // isDirectory determines if a path is likely a directory
 func (e *Engine) isDirectory(url string, statusCode int) bool {
-	// Redirects indicate directories
+	// Redirects typically indicate directories
 	if statusCode == 301 || statusCode == 302 || statusCode == 307 || statusCode == 308 {
 		return true
 	}
@@ -379,6 +690,12 @@ func (e *Engine) PrintStats() {
 	fmt.Println(strings.Repeat("─", 70))
 	utils.PrintInfo("Completed in %s", duration.Round(time.Millisecond))
 	utils.PrintInfo("Requests: %d | Found: %d | Errors: %d", processed, found, errors)
+
+	// Print directories found
+	dirs := e.getAllDirectories()
+	if len(dirs) > 0 {
+		utils.PrintSuccess("Directories found: %d", len(dirs))
+	}
 
 	if e.writer.IsEnabled() {
 		utils.PrintSuccess("Saved to: %s", e.writer.GetPath())

@@ -8,7 +8,7 @@ import (
 	"github.com/Fastdev75/xsearch/internal/utils"
 )
 
-// Printer handles real-time terminal output
+// Printer handles real-time terminal output with tree structure
 type Printer struct {
 	mu           sync.Mutex
 	statusFilter map[int]bool
@@ -22,7 +22,6 @@ func NewPrinter(statusCodes []int) *Printer {
 	}
 
 	if len(statusCodes) == 0 {
-		// Default: show all interesting status codes
 		p.showAll = true
 	} else {
 		for _, code := range statusCodes {
@@ -33,14 +32,12 @@ func NewPrinter(statusCodes []int) *Printer {
 	return p
 }
 
-// PrintResult prints a scan result to the terminal with color coding
+// PrintResult prints a scan result with hierarchical tree structure
 func (p *Printer) PrintResult(url string, statusCode int, size int64, isDir bool, depth int) bool {
-	// Check if we should display this status code
 	if !p.showAll && !p.statusFilter[statusCode] {
 		return false
 	}
 
-	// Skip 404 by default unless explicitly requested
 	if p.showAll && statusCode == 404 {
 		return false
 	}
@@ -51,19 +48,32 @@ func (p *Printer) PrintResult(url string, statusCode int, size int64, isDir bool
 	color := p.getStatusColor(statusCode)
 	sizeStr := formatSize(size)
 
-	// Create indentation based on depth
-	indent := strings.Repeat("  ", depth)
-
-	// Type indicator
-	typeIcon := "FILE"
-	typeColor := utils.White
+	// Type indicator with icon
+	var typeIcon, typeColor string
 	if isDir {
-		typeIcon = "DIR "
+		typeIcon = "📁"
 		typeColor = utils.Cyan
+	} else {
+		typeIcon = "📄"
+		typeColor = utils.White
 	}
 
+	// Build tree prefix based on depth
+	var prefix string
+	if depth == 0 {
+		// Root level - no prefix
+		prefix = ""
+	} else if depth == 1 {
+		// First level subdirectory
+		prefix = "├── "
+	} else {
+		// Deeper levels with visual hierarchy
+		prefix = strings.Repeat("│   ", depth-1) + "├── "
+	}
+
+	// Format: prefix [STATUS] 📁/📄 URL [SIZE]
 	fmt.Printf("%s%s[%d]%s %s%s%s %s %s[%s]%s\n",
-		indent,
+		prefix,
 		color, statusCode, utils.Reset,
 		typeColor, typeIcon, utils.Reset,
 		url,
@@ -116,20 +126,9 @@ func (p *Printer) ShouldShow(statusCode int) bool {
 // IsInteresting checks if a status code is considered interesting for output file
 func IsInteresting(statusCode int) bool {
 	interesting := map[int]bool{
-		200: true,
-		201: true,
-		204: true,
-		301: true,
-		302: true,
-		307: true,
-		308: true,
-		401: true,
-		403: true,
-		405: true,
-		500: true,
-		501: true,
-		502: true,
-		503: true,
+		200: true, 201: true, 204: true,
+		301: true, 302: true, 307: true, 308: true,
+		401: true, 403: true, 405: true,
 	}
 	return interesting[statusCode]
 }

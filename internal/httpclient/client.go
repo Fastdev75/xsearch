@@ -20,13 +20,13 @@ type Config struct {
 // DefaultConfig returns a default HTTP client configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Timeout:         10 * time.Second,
+		Timeout:         5 * time.Second, // Reduced from 10s for speed
 		FollowRedirects: false,
-		UserAgent:       "Xsearch/2.0",
+		UserAgent:       "Xsearch/3.0",
 	}
 }
 
-// NewClient creates a new optimized HTTP client
+// NewClient creates a new highly optimized HTTP client
 func NewClient(cfg *Config) *http.Client {
 	if cfg == nil {
 		cfg = DefaultConfig()
@@ -39,17 +39,21 @@ func NewClient(cfg *Config) *http.Client {
 		},
 		DialContext: (&net.Dialer{
 			Timeout:   cfg.Timeout,
-			KeepAlive: 30 * time.Second,
+			KeepAlive: 60 * time.Second, // Increased for better connection reuse
 		}).DialContext,
-		MaxIdleConns:          200,
-		MaxIdleConnsPerHost:   100,
-		MaxConnsPerHost:       100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
+		// Optimized connection pool settings
+		MaxIdleConns:          500,  // Increased from 200
+		MaxIdleConnsPerHost:   200,  // Increased from 100
+		MaxConnsPerHost:       200,  // Increased from 100
+		IdleConnTimeout:       120 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second, // Reduced from 10s
 		ExpectContinueTimeout: 1 * time.Second,
 		DisableKeepAlives:     false,
-		DisableCompression:    false,
+		DisableCompression:    true, // Disable for speed (we don't need to decompress)
 		ForceAttemptHTTP2:     true,
+		ResponseHeaderTimeout: cfg.Timeout,
+		WriteBufferSize:       4096,  // Optimized buffer
+		ReadBufferSize:        16384, // Optimized buffer for reading
 	}
 
 	client := &http.Client{
@@ -57,7 +61,7 @@ func NewClient(cfg *Config) *http.Client {
 		Timeout:   cfg.Timeout,
 	}
 
-	// Disable redirect following if configured
+	// Disable redirect following for directory detection
 	if !cfg.FollowRedirects {
 		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -98,13 +102,10 @@ func request(client *http.Client, url string, userAgent string, readBody bool) *
 		return result
 	}
 
-	// Set headers to mimic a real browser
+	// Minimal headers for speed
 	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
-	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -123,8 +124,8 @@ func request(client *http.Client, url string, userAgent string, readBody bool) *
 
 	if readBody {
 		// Read body for accurate size and hash calculation
-		// Limit to 1MB to prevent memory issues
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+		// Limit to 512KB for speed (reduced from 1MB)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 		if err != nil {
 			result.Error = err
 			return result
@@ -136,7 +137,7 @@ func request(client *http.Client, url string, userAgent string, readBody bool) *
 		result.Size = resp.ContentLength
 		if result.Size < 0 {
 			// Try to read a small portion to get actual size
-			body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
 			if err == nil {
 				result.Size = int64(len(body))
 				result.BodyHash = fmt.Sprintf("%x", md5.Sum(body))
@@ -147,7 +148,7 @@ func request(client *http.Client, url string, userAgent string, readBody bool) *
 	return result
 }
 
-// HeadRequest performs an HTTP HEAD request (faster, no body)
+// HeadRequest performs an HTTP HEAD request (much faster, no body transfer)
 func HeadRequest(client *http.Client, url string, userAgent string) *Result {
 	result := &Result{URL: url}
 
@@ -157,6 +158,7 @@ func HeadRequest(client *http.Client, url string, userAgent string) *Result {
 		return result
 	}
 
+	// Minimal headers for speed
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Connection", "keep-alive")

@@ -3,25 +3,39 @@ package wordlist
 import (
 	"bufio"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Fastdev75/xsearch/internal/utils"
 )
 
 // Default wordlist paths (in order of preference)
 var DefaultWordlists = []string{
-	"/usr/share/seclists/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-medium.txt",
-	"/usr/share/seclists/Discovery/Web-Content/big.txt",
+	"/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt",
 	"/usr/share/seclists/Discovery/Web-Content/common.txt",
-	"/usr/share/wordlists/dirb/big.txt",
 	"/usr/share/wordlists/dirb/common.txt",
 }
+
+// Bundled wordlist URL (SecLists common.txt)
+const BundledWordlistURL = "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt"
 
 // Manager handles wordlist operations
 type Manager struct {
 	path  string
 	words []string
+}
+
+// getXsearchDir returns the xsearch data directory
+func getXsearchDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "/tmp/.xsearch"
+	}
+	return filepath.Join(home, ".xsearch")
 }
 
 // NewManager creates a new wordlist manager
@@ -40,8 +54,25 @@ func NewManager(customPath string) (*Manager, error) {
 				break
 			}
 		}
+
+		// Check for bundled wordlist
 		if !found {
-			return nil, fmt.Errorf("no wordlist found. Install SecLists: sudo apt install seclists")
+			bundledPath := filepath.Join(getXsearchDir(), "wordlists", "common.txt")
+			if _, err := os.Stat(bundledPath); err == nil {
+				m.path = bundledPath
+				found = true
+			}
+		}
+
+		// Download wordlist if none found
+		if !found {
+			utils.PrintWarning("No wordlist found. Downloading default wordlist...")
+			downloadedPath, err := downloadWordlist()
+			if err != nil {
+				return nil, fmt.Errorf("failed to download wordlist: %w\nInstall manually: sudo apt install seclists", err)
+			}
+			m.path = downloadedPath
+			utils.PrintSuccess("Wordlist downloaded to: %s", downloadedPath)
 		}
 	}
 
@@ -51,6 +82,44 @@ func NewManager(customPath string) (*Manager, error) {
 	}
 
 	return m, nil
+}
+
+// downloadWordlist downloads the default wordlist
+func downloadWordlist() (string, error) {
+	// Create directory
+	wordlistDir := filepath.Join(getXsearchDir(), "wordlists")
+	if err := os.MkdirAll(wordlistDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	destPath := filepath.Join(wordlistDir, "common.txt")
+
+	// Download with timeout
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Get(BundledWordlistURL)
+	if err != nil {
+		return "", fmt.Errorf("download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("download failed with status: %d", resp.StatusCode)
+	}
+
+	// Create file
+	out, err := os.Create(destPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create file: %w", err)
+	}
+	defer out.Close()
+
+	// Copy content
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to write file: %w", err)
+	}
+
+	return destPath, nil
 }
 
 // Load reads the wordlist file and returns words

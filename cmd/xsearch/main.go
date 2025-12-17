@@ -16,19 +16,20 @@ import (
 	"github.com/Fastdev75/xsearch/internal/wordlist"
 )
 
-const version = "2.0.0"
+const version = "1.0.3"
 
 func main() {
 	// Essential flags only
 	targetURL := flag.String("u", "", "Target URL (required)")
 	wordlistPath := flag.String("w", "", "Custom wordlist path")
 	outputFile := flag.String("o", "", "Output file")
-	threads := flag.Int("t", 50, "Threads")
+	threads := flag.Int("t", 100, "Threads (default: 100 for speed)")
 	extensions := flag.String("x", "", "Extensions (e.g., php,html,js)")
+	timeout := flag.Int("timeout", 5, "Timeout in seconds (default: 5)")
 
 	// Simple toggles
 	noRecursive := flag.Bool("nr", false, "Disable recursive mode")
-	depth := flag.Int("d", 3, "Max depth")
+	depth := flag.Int("d", 5, "Max recursion depth (default: 5)")
 
 	// Filtering (advanced)
 	filterCodes := flag.String("fc", "", "Filter status codes (e.g., 403,500)")
@@ -42,7 +43,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("xsearch v%s\n", version)
+		fmt.Printf("xsearch v%s - Fast Content Discovery\n", version)
 		os.Exit(0)
 	}
 
@@ -55,7 +56,7 @@ func main() {
 		utils.Banner()
 	}
 
-	// Parse extensions
+	// Parse extensions - use defaults if not specified for complete discovery
 	var exts []string
 	if *extensions != "" {
 		for _, ext := range strings.Split(*extensions, ",") {
@@ -63,6 +64,13 @@ func main() {
 			if ext != "" {
 				exts = append(exts, ext)
 			}
+		}
+	} else {
+		// Default extensions - optimized for speed and common findings
+		exts = []string{
+			"php", "html", "js", "txt", "xml", "json",
+			"bak", "old", "sql", "log", "env", "config",
+			"asp", "aspx", "jsp", "zip", "gz",
 		}
 	}
 
@@ -107,12 +115,12 @@ func main() {
 	}
 	defer writer.Close()
 
-	// Config with optimal defaults
+	// Config with optimized defaults for speed
 	config := &scanner.Config{
 		TargetURL:    *targetURL,
 		Words:        words,
 		Threads:      *threads,
-		Timeout:      10 * time.Second,
+		Timeout:      time.Duration(*timeout) * time.Second,
 		UserAgent:    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 		Extensions:   exts,
 		Recursive:    !*noRecursive, // Recursive ON by default
@@ -149,19 +157,22 @@ func printHelp() {
   xsearch -u <url> [options]
 
 EXAMPLES:
-  xsearch -u https://target.com                    # Full recursive scan
-  xsearch -u https://target.com -x php,html        # With extensions
+  xsearch -u https://target.com                    # FULL content discovery (dirs + files)
+  xsearch -u https://target.com -x php,html        # Custom extensions only
   xsearch -u https://target.com -o results.txt     # Save results
-  xsearch -u https://target.com -nr                # Single scan (no recursion)
+  xsearch -u https://target.com -t 200             # High-speed scan (200 threads)
+  xsearch -u https://target.com -nr                # Single depth (no recursion)
   xsearch -u https://target.com -fc 403,500        # Filter status codes
+  xsearch -u https://target.com -d 10              # Deep recursion (10 levels)
 
 OPTIONS:
   -u <url>       Target URL (required)
   -w <file>      Custom wordlist
   -o <file>      Output file
-  -t <n>         Threads (default: 50)
-  -x <ext>       Extensions to test (comma-separated)
-  -d <n>         Max recursion depth (default: 3)
+  -t <n>         Threads (default: 100)
+  -x <ext>       Extensions (default: php,html,js,txt,json,xml,bak,sql,etc.)
+  -d <n>         Max recursion depth (default: 5)
+  -timeout <s>   HTTP timeout in seconds (default: 5)
   -nr            Disable recursive scanning
   -fc <codes>    Filter/hide status codes
   -fs <sizes>    Filter/hide by response size
@@ -169,10 +180,19 @@ OPTIONS:
   -v             Version
   -h             Help
 
-FEATURES (all enabled by default):
-  • Recursive directory scanning (BFS)
-  • Soft 404 detection (hash-based)
-  • Directory detection with slash appending
-  • URL deduplication
-  • Real-time colored output`)
+SCAN STRATEGY (3 phases - all automatic):
+  1. Directory Discovery - Fast HEAD requests to find directories
+  2. Recursive Scan     - Subdirectories at each depth level
+  3. File Discovery     - Find files (30+ extensions by default)
+
+DEFAULT EXTENSIONS (17):
+  php html js txt xml json bak old sql log env config
+  asp aspx jsp zip gz
+
+OPTIMIZATIONS:
+  - HEAD requests for fast discovery
+  - GET only for verification
+  - Multi-point soft 404 calibration
+  - High concurrency (100 threads)
+  - HTTP/2 + connection pooling`)
 }
