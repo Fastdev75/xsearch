@@ -30,13 +30,13 @@ func main() {
 	targetURL := flag.String("u", "", "Target URL (required)")
 	wordlistPath := flag.String("w", "", "Custom wordlist path")
 	outputFile := flag.String("o", "", "Output file")
-	threads := flag.Int("t", 100, "Threads (default: 100 for speed)")
+	threads := flag.Int("t", 150, "Threads (default: 150)")
 	extensions := flag.String("x", "", "Extensions (e.g., php,html,js)")
-	timeout := flag.Int("timeout", 5, "Timeout in seconds (default: 5)")
+	timeout := flag.Int("timeout", 10, "Timeout in seconds (default: 10)")
 
 	// Simple toggles
 	noRecursive := flag.Bool("nr", false, "Disable recursive mode")
-	depth := flag.Int("d", 5, "Max recursion depth (default: 5)")
+	depth := flag.Int("d", 10, "Max recursion depth (default: 10)")
 
 	// Filtering (advanced)
 	filterCodes := flag.String("fc", "", "Filter status codes (e.g., 403,500)")
@@ -82,11 +82,24 @@ func main() {
 			}
 		}
 	} else {
-		// Default extensions - optimized for speed and common findings
+		// Default extensions - comprehensive web content discovery
 		exts = []string{
-			"php", "html", "js", "txt", "xml", "json",
-			"bak", "old", "sql", "log", "env", "config",
-			"asp", "aspx", "jsp", "zip", "gz",
+			// Web scripts
+			"php", "php3", "php4", "php5", "phtml", "inc",
+			"asp", "aspx", "jsp", "jspx", "do", "action",
+			"html", "htm", "xhtml", "shtml",
+			"js", "ts", "jsx", "tsx", "vue", "mjs",
+			// Data & Config
+			"json", "xml", "yaml", "yml", "toml", "ini", "conf", "config", "cfg",
+			"env", "properties", "htaccess", "htpasswd",
+			// Backup & Source
+			"bak", "backup", "old", "orig", "copy", "tmp", "temp", "swp",
+			"sql", "db", "sqlite", "mdb",
+			"log", "logs", "txt", "md", "csv",
+			// Archives
+			"zip", "tar", "gz", "rar", "7z", "tgz",
+			// Special
+			"git", "svn", "DS_Store",
 		}
 	}
 
@@ -173,47 +186,47 @@ func printHelp() {
   xsearch -u <url> [options]
 
 EXAMPLES:
-  xsearch -u https://target.com                    # FULL content discovery (dirs + files)
+  xsearch -u https://target.com                    # FULL aggressive discovery
+  xsearch -u https://target.com -o results.txt     # Save results to file
+  xsearch -u https://target.com -t 300             # Ultra-fast (300 threads)
   xsearch -u https://target.com -x php,html        # Custom extensions only
-  xsearch -u https://target.com -o results.txt     # Save results
-  xsearch -u https://target.com -t 200             # High-speed scan (200 threads)
-  xsearch -u https://target.com -nr                # Single depth (no recursion)
-  xsearch -u https://target.com -fc 403,500        # Filter status codes
-  xsearch -u https://target.com -d 10              # Deep recursion (10 levels)
+  xsearch -u https://target.com -nr                # No recursion (fast scan)
+  xsearch -u https://target.com -fc 403            # Hide 403 responses
 
 OPTIONS:
   -u <url>       Target URL (required)
-  -w <file>      Custom wordlist
-  -o <file>      Output file
-  -t <n>         Threads (default: 100)
-  -x <ext>       Extensions (default: php,html,js,txt,json,xml,bak,sql,etc.)
-  -d <n>         Max recursion depth (default: 5)
-  -timeout <s>   HTTP timeout in seconds (default: 5)
+  -w <file>      Custom wordlist (auto-downloads if none)
+  -o <file>      Output file (URLs only, deduplicated)
+  -t <n>         Threads (default: 150)
+  -x <ext>       Extensions (default: 50+ extensions)
+  -d <n>         Max recursion depth (default: 10)
+  -timeout <s>   Timeout in seconds (default: 10)
   -nr            Disable recursive scanning
-  -fc <codes>    Filter/hide status codes
-  -fs <sizes>    Filter/hide by response size
-  -q             Quiet mode
+  -fc <codes>    Filter status codes (e.g., 403,500)
+  -fs <sizes>    Filter by size (e.g., 0,1234)
+  -q             Quiet mode (no banner)
   -v             Version
   -h             Help
+  -up            Auto-upgrade from GitHub
 
-SCAN STRATEGY (3 phases - all automatic):
-  1. Directory Discovery - Fast HEAD requests to find directories
-  2. Recursive Scan     - Subdirectories at each depth level
-  3. File Discovery     - Find files (30+ extensions by default)
+DEFAULT BEHAVIOR (no flags needed):
+  - 150 concurrent threads
+  - 10 levels deep recursion
+  - 50+ file extensions tested
+  - Auto soft-404 detection
+  - Directories + files discovery
 
-DEFAULT EXTENSIONS (17):
-  php html js txt xml json bak old sql log env config
-  asp aspx jsp zip gz
+EXTENSIONS (50+):
+  Scripts:  php php3-5 asp aspx jsp html js ts vue
+  Config:   json xml yaml env ini conf htaccess
+  Backup:   bak old sql log zip tar gz
+  Special:  git svn DS_Store
 
 OPTIMIZATIONS:
-  - HEAD requests for fast discovery
-  - GET only for verification
-  - Multi-point soft 404 calibration
-  - High concurrency (100 threads)
-  - HTTP/2 + connection pooling
-
-UPGRADE:
-  -up            Auto-upgrade to latest version from GitHub`)
+  - HEAD requests for speed
+  - Dynamic soft-404 filtering
+  - Connection pooling + HTTP/2
+  - Real-time progress bar`)
 }
 
 // GitHubRelease represents a GitHub release
