@@ -15,7 +15,7 @@ const (
 )
 
 // Version is set during build or defaults to dev
-var Version = "1.0.4"
+var Version = "1.0.6"
 
 // Banner displays the Xsearch ASCII art banner in red
 func Banner() {
@@ -30,7 +30,7 @@ func Banner() {
 ` + Reset + `
 ` + Cyan + `        [ Modern Web Content Discovery Tool ]` + Reset + `
 ` + Yellow + `                    v` + Version + Reset + `
-` + White + `             github.com/mcauet/xsearch` + Reset + `
+` + White + `           github.com/Fastdev75/xsearch` + Reset + `
 `
 	fmt.Println(banner)
 }

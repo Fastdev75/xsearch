@@ -21,8 +21,8 @@ import (
 	"github.com/Fastdev75/xsearch/internal/wordlist"
 )
 
-const version = "1.0.4"
-const repoOwner = "mcauet"
+const version = "1.0.6"
+const repoOwner = "Fastdev75"
 const repoName = "xsearch"
 
 func main() {
@@ -30,7 +30,7 @@ func main() {
 	targetURL := flag.String("u", "", "Target URL (required)")
 	wordlistPath := flag.String("w", "", "Custom wordlist path")
 	outputFile := flag.String("o", "", "Output file")
-	threads := flag.Int("t", 150, "Threads (default: 150)")
+	threads := flag.Int("t", 50, "Threads (default: 50)")
 	extensions := flag.String("x", "", "Extensions (e.g., php,html,js)")
 	timeout := flag.Int("timeout", 10, "Timeout in seconds (default: 10)")
 
@@ -197,7 +197,7 @@ OPTIONS:
   -u <url>       Target URL (required)
   -w <file>      Custom wordlist (auto-downloads if none)
   -o <file>      Output file (URLs only, deduplicated)
-  -t <n>         Threads (default: 150)
+  -t <n>         Threads (default: 50)
   -x <ext>       Extensions (default: 50+ extensions)
   -d <n>         Max recursion depth (default: 10)
   -timeout <s>   Timeout in seconds (default: 10)
@@ -210,10 +210,10 @@ OPTIONS:
   -up            Auto-upgrade from GitHub
 
 DEFAULT BEHAVIOR (no flags needed):
-  - 150 concurrent threads
+  - 50 concurrent threads (safe for most targets)
   - 10 levels deep recursion
   - 50+ file extensions tested
-  - Auto soft-404 detection
+  - Auto soft-404 + rate-limit detection
   - Directories + files discovery
 
 EXTENSIONS (50+):

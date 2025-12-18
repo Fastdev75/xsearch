@@ -675,12 +675,22 @@ func (e *Engine) isSoft404(hash string, size int64) bool {
 // trackSoft404Size tracks response sizes for dynamic soft 404 detection
 // Returns true if this size has been seen too many times (likely soft 404)
 func (e *Engine) trackSoft404Size(size int64, statusCode int) bool {
-	// Only track 403 and 401 responses - these are often soft 404s
-	if statusCode != 403 && statusCode != 401 {
+	// Track 403, 401, and 429 responses - these are often soft 404s or rate limits
+	if statusCode != 403 && statusCode != 401 && statusCode != 429 {
 		return false
 	}
 
-	// Very small responses are often error pages
+	// 429 Too Many Requests - always filter after seeing a few (rate limiting)
+	if statusCode == 429 {
+		e.soft404SizesMux.Lock()
+		e.soft404Sizes[size]++
+		count := e.soft404Sizes[size]
+		e.soft404SizesMux.Unlock()
+		// Filter 429 after just 3 occurrences - it's rate limiting
+		return count > 3
+	}
+
+	// For 403/401: filter if small response seen many times
 	if size < 100 {
 		e.soft404SizesMux.Lock()
 		e.soft404Sizes[size]++
